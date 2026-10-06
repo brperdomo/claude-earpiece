@@ -21,9 +21,9 @@ Zoom web client (Chrome)          your Mac                        Claude Code
 └──────────────────────┘          └───────────────┘   20 s   └──────────────────┘
 ```
 
-- **`recorder.js`** runs in the Zoom tab. It reads the **full transcript panel** (exact speaker names) when Zoom shows it, and otherwise falls back to the **caption overlay**, naming speakers from caption initials and the active-speaker tile. It removes repeated text from rolling captions and sends each finished line to the local sink.
+- **`recorder.js`** runs in the Zoom tab. It reads the **full transcript panel** (exact speaker names) when Zoom shows it, and otherwise falls back to the **caption overlay**, naming speakers from caption initials and the active-speaker tile. It removes repeated text from rolling captions and sends each finished line to the local sink. Lines stay queued until the sink confirms them, so a sink restart doesn't lose anything, and a heartbeat every ~10 seconds reports that the recorder is still alive.
 - **`sink.py`** is a tiny HTTP server, bound to `127.0.0.1` only, that accepts lines only from `https://app.zoom.us` and appends them to a transcript file.
-- **`watch.sh`** batches new lines every 20 seconds into a Claude Code Monitor, so Claude is notified instead of polling.
+- **`watch.sh`** batches new lines every 20 seconds into a Claude Code Monitor, so Claude is notified instead of polling. It also raises a single alert when the sink stops, or when the recorder goes quiet (for example, the Zoom tab reloaded).
 
 Nothing goes to a third-party service. The transcript stays on your machine, and Claude sees it the same way it sees any other tool output.
 
@@ -56,7 +56,7 @@ Or copy `skills/earpiece` into `~/.claude/skills/` instead of linking it. Start 
 Tips:
 - Give Claude context before the call (who it's with, the goal, your prep notes). The nudges get much better.
 - When screen sharing, share a single window, not your whole screen.
-- Keep the Zoom tab open and don't reload it. If it reloads, ask Claude to re-inject the recorder.
+- Keep the Zoom tab open and don't reload it. If it does reload, Claude gets a "recorder silent" alert and re-injects the recorder.
 
 ## Consent and privacy
 

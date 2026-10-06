@@ -20,13 +20,13 @@ Scripts live in `~/.claude/skills/earpiece/scripts/`.
 2. **Pick a transcript path:** `<cwd>/earpiece-transcripts/<YYYYMMDD-HHMM>.txt`.
 3. **Start the sink** with Bash `run_in_background`:
    `python3 ~/.claude/skills/earpiece/scripts/sink.py "<transcript path>"`
-   If port 8765 is already in use, an old sink is still running. Stop it first.
+   If port 8765 is already in use, an old sink is still running. Stop it first. To use another port, pass it as a second argument and run `window.__earpiecePort = <port>` in the Zoom tab before injecting the recorder.
 4. **Find the Zoom tab** with `tabs_context_mcp`. If there's none, navigate a group tab to `https://app.zoom.us/wc/home` and have the user join the meeting there.
 5. **Turn on captions and the transcript.** With `javascript_tool` in the meeting frame (iframe src matches `webmeeting` or `/wc/<id>/join|start`):
    - Click `[aria-label="Show Captions"]` if it's present.
    - Open `[aria-label="More options for captions, menu button"]` and click "View full transcript". Dispatch pointerdown, mousedown, pointerup, mouseup and click events; a bare `.click()` often does nothing.
    - If the panel doesn't open (common for non-hosts), continue. The recorder falls back to the overlay.
-6. **Inject the recorder:** `cat` `recorder.js` and pass its contents to `javascript_tool`. Then verify with `({mode: __rec.mode, err: __rec.err})` a few seconds later. Mode should be `panel` or `overlay`.
+6. **Inject the recorder:** `cat` `recorder.js` and pass its contents to `javascript_tool`. Then verify with `({mode: __rec.mode, err: __rec.err, sinkErr: __rec.sinkErr, queued: __rec.q.length})` a few seconds later. Mode should be `panel` or `overlay`, and both errors should be empty.
 7. **Start the Monitor:** `bash ~/.claude/skills/earpiece/scripts/watch.sh "<transcript path>"` with `timeout_ms: 1800000`. Re-arm it on expiry while the call continues, passing the current line count as the second argument.
 8. **Tell the user** it's live, the delay (about 20–30 seconds), and to keep the tab open and not reload it.
 
@@ -41,7 +41,11 @@ Scripts live in `~/.claude/skills/earpiece/scripts/`.
 - **Do the math** when they give volumes or figures, and say what it implies.
 - **Speaker labels can be wrong** in overlay mode, so use context. Lines from the user may be credited to someone else.
 - **For deep domain questions,** ask a relevant subagent in the background, with a request for a short answer marked VERIFIED or UNVERIFIED. Relay only the takeaway.
-- **If `ALERT: transcript sink is down` appears,** restart the sink, then re-inject the recorder.
+- **The Monitor prints one `ALERT:`/`OK:` line per state change.** Act on alerts once; don't repeat them to the user unless they persist.
+  - `transcript sink is down`: restart the sink with the same transcript path. The recorder keeps unsent lines queued and delivers them on its own once the sink is back, so no re-injection is needed.
+  - `recorder silent` or `no heartbeat from the recorder yet`: the Zoom tab reloaded, closed, or the recorder was never injected. Re-inject the recorder.
+  - `no meeting frame found`: the user left the meeting or is in the lobby. Mention it once.
+  - `recorder error: …`: the page structure may have changed. See Known limits.
 - **If the page reloads** (rejoin, new meeting), re-inject the recorder.
 
 ## Stop (when the user says the call ended)
@@ -51,7 +55,7 @@ Scripts live in `~/.claude/skills/earpiece/scripts/`.
    - **Internal summary:** needs, numbers, decisions, commitments, risks, owners.
    - **Follow-up email draft:** what we heard, recommended approach, what we'll send, what we need from them, next step and timing.
    Never send anything without explicit approval.
-4. Tell the user where the transcript is, and offer to delete it once the summary is final.
+4. Tell the user where the transcript is, and offer to delete it (and its `.hb` heartbeat file) once the summary is final.
 
 ## Known limits
 - Zoom's page structure isn't a public API, so class names can change. If the recorder finds nothing, inspect the meeting frame for elements whose class contains `transcript` or `subtitle`, and adapt.
