@@ -1,18 +1,24 @@
-// earpiece recorder for the Zoom web client. Run in the meeting tab's top frame.
-// Prefers the "View full transcript" panel (speaker + time per line); falls back to the
+// earpiece recorder for the Zoom and Microsoft Teams web clients. Run in the meeting tab's top frame.
+// Zoom: prefers the "View full transcript" panel (speaker + time per line); falls back to the
 // caption overlay, naming speakers from caption initials or the active-speaker tile.
+// Teams: reads the live captions pane, where every line carries its speaker's name.
 // Finalized lines are queued and POSTed to the local sink; they stay queued until the sink
 // accepts them. Every ~10s a heartbeat ({mode, err}) is posted even with no new lines.
-// Set window.__earpiecePort first to use a port other than 8765. Re-running restarts cleanly.
+// Teams' CSP only allows http://localhost:4318, so the sink port defaults to 4318 there and
+// 8765 on Zoom. Set window.__earpiecePort first to override, and window.__earpiecePlatform
+// ('zoom' or 'teams') to skip hostname detection. Re-running restarts cleanly.
 (() => {
   const W = window;
-  if (W.__rec) clearInterval(W.__rec.timer);
+  if (W.__rec) { clearInterval(W.__rec.timer); document.removeEventListener('securitypolicyviolation', W.__rec.onCsp); }
   const R = W.__rec = {
-    panel: new Map(), porder: [], psent: new Set(), els: new WeakMap(), seq: 0,
+    panel: new Map(), porder: [], psent: new Set(), els: new WeakMap(), tels: new WeakMap(), seq: 0,
     list: [], sent: 0, lastOut: '', mode: '', err: '',
-    q: [], busy: false, lastPost: 0, sinkErr: '',
+    q: [], busy: false, lastPost: 0, sinkErr: '', csp: '',
   };
-  const SINK = `http://127.0.0.1:${W.__earpiecePort || 8765}/`;
+  const TEAMS = W.__earpiecePlatform ? W.__earpiecePlatform === 'teams' : /(^|\.)teams\.(microsoft\.com|cloud\.microsoft|live\.com)$/.test(location.hostname);
+  const SINK = TEAMS ? `http://localhost:${W.__earpiecePort || 4318}/` : `http://127.0.0.1:${W.__earpiecePort || 8765}/`;
+  R.onCsp = e => { if ((e.blockedURI || '').startsWith(SINK.slice(0, -1))) R.csp = `blocked by the page's CSP (${e.effectiveDirective})`; };
+  document.addEventListener('securitypolicyviolation', R.onCsp);
   const SETTLE = 6000, HEARTBEAT = 10000, RETRY = 3000, QMAX = 5000;
   const norm = s => (s || '').replace(/\s+/g, ' ').trim();
   const initials = n => n.split(/\s+/).filter(Boolean).map(w => w[0]).join('').toUpperCase();
@@ -79,6 +85,33 @@
     });
   }
 
+  // Teams renders each caption as an author + text pair and refines the text in place.
+  // Authors and texts are paired by document order (host and guest layouts nest them
+  // differently). The list is virtualized: rows can be recycled for a new caption, or
+  // re-mounted as fresh elements with the same final text.
+  const TEAMS_WRAPPERS = ['[data-tid="closed-caption-renderer-wrapper"]', '[data-tid="closed-caption-v2-window-wrapper"]', '[data-tid="closed-captions-renderer"]'];
+  function scanTeams() {
+    let root = null;
+    for (const s of TEAMS_WRAPPERS) if ((root = document.querySelector(s))) break;
+    if (!root) return false;
+    let sp = '';
+    root.querySelectorAll('[data-tid="author"], [data-tid="closed-caption-text"]').forEach(el => {
+      if (el.getAttribute('data-tid') === 'author') { sp = norm(el.innerText); return; }
+      const t = norm(el.innerText); if (!t) return;
+      const who = sp || '?';
+      let e = R.tels.get(el);
+      if (e && !(t.startsWith(e.t.slice(0, 12)) || e.t.startsWith(t.slice(0, 12)) || similar(e.t, t))) e = null;
+      if (!e) e = R.list.slice(-50).find(x => x.t === t && (x.sp === who || x.sp === '?'));
+      if (!e) { e = { ts: new Date().toTimeString().slice(0, 8), sp: who, t, upd: Date.now() }; R.list.push(e); }
+      else {
+        if (t !== e.t) { e.t = t; e.upd = Date.now(); }
+        if (e.sp === '?' && who !== '?') e.sp = who;
+      }
+      R.tels.set(el, e);
+    });
+    return true;
+  }
+
   // Move settled lines (or all lines, when forced) from the current mode into the outbox.
   function collect(force) {
     const now = Date.now(), settle = force ? 0 : SETTLE;
@@ -88,10 +121,10 @@
         const e = R.panel.get(k); if (now - e.upd < settle) break;
         R.q.push(`${e.ts} | ${e.sp}: ${e.t}`); R.psent.add(k); R.lastOut = e.t;
       }
-    } else if (R.mode === 'overlay') {
+    } else if (R.mode === 'overlay' || R.mode === 'teams') {
       while (R.sent < R.list.length) {
         const e = R.list[R.sent]; if (now - e.upd < settle) break;
-        const piece = trim(e.t); R.lastOut = e.t; R.sent++;
+        const piece = R.mode === 'overlay' ? trim(e.t) : e.t; R.lastOut = e.t; R.sent++;
         if (piece) R.q.push(`${e.ts} | ${e.sp}: ${piece}`);
       }
     }
@@ -107,12 +140,18 @@
     R.busy = true; R.lastPost = now;
     fetch(SINK, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines, mode: R.mode, err: R.err }) })
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); R.q.splice(0, lines.length); R.sinkErr = ''; })
-      .catch(e => { R.sinkErr = 'sink unreachable: ' + e.message; })
+      .catch(e => { R.sinkErr = 'sink unreachable: ' + (R.csp || e.message); })
       .finally(() => { R.busy = false; });
   }
 
   R.timer = setInterval(() => {
     try {
+      if (TEAMS) {
+        if (scanTeams()) { R.mode = 'teams'; collect(false); }
+        else { if (R.mode === 'teams') collect(true); R.mode = 'no-captions'; }
+        R.err = '';
+        send(); return;
+      }
       const d = mdoc();
       if (!d) { R.mode = 'no-meeting'; send(); return; }
       const items = d.querySelectorAll('.lt-full-transcript__item');
@@ -121,8 +160,11 @@
       if (prev !== next && (prev === 'panel' || prev === 'overlay')) collect(true);
       if (next === 'panel') {
         scanPanel(items);
-        // The panel shows the whole history; skip what the overlay already covered.
-        if (prev === 'overlay' && R.sent > 0) R.porder.forEach(k => R.psent.add(k));
+        // The panel shows the whole history; skip only what the overlay already covered.
+        if (prev === 'overlay' && R.sent > 0) {
+          const seen = R.list.slice(Math.max(0, R.sent - 500), R.sent).map(e => e.t);
+          R.porder.forEach(k => { if (seen.some(t => similar(t, R.panel.get(k).t))) R.psent.add(k); });
+        }
       } else {
         const before = R.list.length;
         scanOverlay(d);

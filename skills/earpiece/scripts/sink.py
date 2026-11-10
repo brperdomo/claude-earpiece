@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Local-only transcript sink for earpiece.
 
-Accepts POSTs from the Zoom web client (origin https://app.zoom.us) and appends each line
-to the transcript file. Binds to 127.0.0.1 only. The body is either a JSON array of lines
+Accepts POSTs from the Zoom and Microsoft Teams web clients and appends each line to the
+transcript file. Binds to 127.0.0.1 only. The body is either a JSON array of lines
 or {"lines": [...], "mode": "...", "err": "..."}. Every accepted POST also rewrites
 <transcript_path>.hb as "<epoch seconds> <mode> <err>" so watch.sh can tell whether the
 in-page recorder is still alive.
 
 Usage: sink.py <transcript_path> [port]
+Use port 4318 for Teams: its CSP only lets the page reach http://localhost:4318.
 Set EARPIECE_EXTRA_ORIGIN to also accept one more origin (for local testing).
 """
 import http.server, json, os, re, sys, time
@@ -16,7 +17,12 @@ OUT = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.abspath("tr
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
 HB = OUT + ".hb"
 MAX_BODY = 1 << 20
-ALLOWED = {"https://app.zoom.us"}
+ALLOWED = {
+    "https://app.zoom.us",
+    "https://teams.microsoft.com",
+    "https://teams.cloud.microsoft",
+    "https://teams.live.com",
+}
 if os.environ.get("EARPIECE_EXTRA_ORIGIN"):
     ALLOWED.add(os.environ["EARPIECE_EXTRA_ORIGIN"])
 os.makedirs(os.path.dirname(OUT), exist_ok=True)

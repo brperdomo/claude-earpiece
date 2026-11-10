@@ -23,7 +23,7 @@ while true; do
     case "$t" in ''|*[!0-9]*) t=0 ;; esac
     if [ "$t" -gt 0 ]; then age=$((now - t)); else age=$((now - start)); fi
     if [ "$age" -gt 45 ]; then s="silent"
-    elif [ "$mode" = "no-meeting" ]; then s="no-meeting"
+    elif [ "$mode" = "no-meeting" ] || [ "$mode" = "no-captions" ]; then s="$mode"
     elif [ "$t" -gt 0 ]; then s="ok"
     else s="$rec"; fi
     if [ "$s" != "$rec" ]; then
@@ -31,6 +31,7 @@ while true; do
         silent)     if [ "$t" -gt 0 ]; then echo "ALERT: recorder silent for ${age}s (Zoom tab reloaded or closed?)"
                     else echo "ALERT: no heartbeat from the recorder yet (not injected?)"; fi ;;
         no-meeting) echo "ALERT: recorder running but no meeting frame found (left the meeting?)" ;;
+        no-captions) echo "ALERT: recorder running but no live captions on screen (captions off, or left the meeting?)" ;;
         ok)         [ -n "$rec" ] && echo "OK: recorder reporting again (mode: $mode)" ;;
       esac
       rec="$s"
