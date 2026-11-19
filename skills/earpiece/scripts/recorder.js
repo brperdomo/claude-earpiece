@@ -1,12 +1,14 @@
-// earpiece recorder for the Zoom and Microsoft Teams web clients. Run in the meeting tab's top frame.
+// earpiece recorder for the Zoom, Microsoft Teams and Google Meet web clients. Run in the meeting tab's top frame.
 // Zoom: prefers the "View full transcript" panel (speaker + time per line); falls back to the
 // caption overlay, naming speakers from caption initials or the active-speaker tile.
-// Teams: reads the live captions pane, where every line carries its speaker's name.
+// Teams and Meet: read the live captions, where every line carries its speaker's name
+// (Meet labels the user's own lines "You").
 // Finalized lines are queued and POSTed to the local sink; they stay queued until the sink
 // accepts them. Every ~10s a heartbeat ({mode, err}) is posted even with no new lines.
 // Teams' CSP only allows http://localhost:4318, so the sink port defaults to 4318 there and
-// 8765 on Zoom. Set window.__earpiecePort first to override, and window.__earpiecePlatform
-// ('zoom' or 'teams') to skip hostname detection. Re-running restarts cleanly.
+// 8765 on Zoom and Meet. Set window.__earpiecePort first to override, and
+// window.__earpiecePlatform ('zoom', 'teams' or 'meet') to skip hostname detection.
+// Re-running restarts cleanly.
 (() => {
   const W = window;
   if (W.__rec) { clearInterval(W.__rec.timer); document.removeEventListener('securitypolicyviolation', W.__rec.onCsp); }
@@ -15,8 +17,9 @@
     list: [], sent: 0, lastOut: '', mode: '', err: '',
     q: [], busy: false, lastPost: 0, sinkErr: '', csp: '',
   };
-  const TEAMS = W.__earpiecePlatform ? W.__earpiecePlatform === 'teams' : /(^|\.)teams\.(microsoft\.com|cloud\.microsoft|live\.com)$/.test(location.hostname);
-  const SINK = TEAMS ? `http://localhost:${W.__earpiecePort || 4318}/` : `http://127.0.0.1:${W.__earpiecePort || 8765}/`;
+  const host = location.hostname;
+  const PLATFORM = W.__earpiecePlatform || (/(^|\.)teams\.(microsoft\.com|cloud\.microsoft|live\.com)$/.test(host) ? 'teams' : host === 'meet.google.com' ? 'meet' : 'zoom');
+  const SINK = PLATFORM === 'teams' ? `http://localhost:${W.__earpiecePort || 4318}/` : `http://127.0.0.1:${W.__earpiecePort || 8765}/`;
   R.onCsp = e => { if ((e.blockedURI || '').startsWith(SINK.slice(0, -1))) R.csp = `blocked by the page's CSP (${e.effectiveDirective})`; };
   document.addEventListener('securitypolicyviolation', R.onCsp);
   const SETTLE = 6000, HEARTBEAT = 10000, RETRY = 3000, QMAX = 5000;
@@ -32,6 +35,12 @@
     const f = [...document.querySelectorAll('iframe')].find(f => /webmeeting|\/wc\/\d+\/(join|start)/.test(f.src || ''));
     try { return f && f.contentDocument; } catch (e) { return null; }
   };
+  // A caption that grows long may lose its start on screen. If the new text's opening sits
+  // inside the old text, keep the old start instead of replacing it.
+  const cut = (old, t) => t.length >= 20 ? old.toLowerCase().indexOf(t.slice(0, 20).toLowerCase()) : -1;
+  const merge = (old, t) => { const p = cut(old, t); return p > 0 ? old.slice(0, p) + t : t; };
+  // Whether new text in an element is the same caption refined, rather than a recycled element.
+  const continues = (old, t) => t.startsWith(old.slice(0, 12)) || old.startsWith(t.slice(0, 12)) || cut(old, t) > 0 || similar(old, t);
   // Drop text already sent: rolling captions repeat the previous tail.
   const trim = t => { const p = R.lastOut; for (let k = Math.min(p.length, t.length); k >= 15; k--) if (p.endsWith(t.slice(0, k))) return t.slice(k).trim(); return t; };
 
@@ -85,31 +94,58 @@
     });
   }
 
-  // Teams renders each caption as an author + text pair and refines the text in place.
-  // Authors and texts are paired by document order (host and guest layouts nest them
-  // differently). The list is virtualized: rows can be recycled for a new caption, or
-  // re-mounted as fresh elements with the same final text.
-  const TEAMS_WRAPPERS = ['[data-tid="closed-caption-renderer-wrapper"]', '[data-tid="closed-caption-v2-window-wrapper"]', '[data-tid="closed-captions-renderer"]'];
-  function scanTeams() {
-    let root = null;
-    for (const s of TEAMS_WRAPPERS) if ((root = document.querySelector(s))) break;
-    if (!root) return false;
-    let sp = '';
-    root.querySelectorAll('[data-tid="author"], [data-tid="closed-caption-text"]').forEach(el => {
-      if (el.getAttribute('data-tid') === 'author') { sp = norm(el.innerText); return; }
-      const t = norm(el.innerText); if (!t) return;
+  // Teams and Meet render each caption as a speaker + text pair and refine the text in place,
+  // so lines are tracked per text element. Elements can be recycled for a new caption (a
+  // different text), or re-mounted as fresh elements with the same final text.
+  function track(pairs) {
+    pairs.forEach(({ el, sp, t }) => {
+      if (!t) return;
       const who = sp || '?';
       let e = R.tels.get(el);
-      if (e && !(t.startsWith(e.t.slice(0, 12)) || e.t.startsWith(t.slice(0, 12)) || similar(e.t, t))) e = null;
-      if (!e) e = R.list.slice(-50).find(x => x.t === t && (x.sp === who || x.sp === '?'));
+      if (e && !continues(e.t, t)) e = null;
+      if (!e) e = R.list.slice(-50).find(x => (x.t === t || (x.t.length > t.length && x.t.endsWith(t))) && (x.sp === who || x.sp === '?'));
       if (!e) { e = { ts: new Date().toTimeString().slice(0, 8), sp: who, t, upd: Date.now() }; R.list.push(e); }
       else {
-        if (t !== e.t) { e.t = t; e.upd = Date.now(); }
+        const m = merge(e.t, t);
+        if (m !== e.t) { e.t = m; e.upd = Date.now(); }
         if (e.sp === '?' && who !== '?') e.sp = who;
       }
       R.tels.set(el, e);
     });
-    return true;
+  }
+
+  // Teams: authors and texts are paired by document order (host and guest layouts nest them
+  // differently). The list is virtualized.
+  const TEAMS_WRAPPERS = ['[data-tid="closed-caption-renderer-wrapper"]', '[data-tid="closed-caption-v2-window-wrapper"]', '[data-tid="closed-captions-renderer"]'];
+  function teamsPairs() {
+    let root = null;
+    for (const s of TEAMS_WRAPPERS) if ((root = document.querySelector(s))) break;
+    if (!root) return null;
+    let sp = '';
+    const out = [];
+    root.querySelectorAll('[data-tid="author"], [data-tid="closed-caption-text"]').forEach(el => {
+      if (el.getAttribute('data-tid') === 'author') sp = norm(el.innerText);
+      else out.push({ el, sp, t: norm(el.innerText) });
+    });
+    return out;
+  }
+
+  // Meet: class names are obfuscated and change, so each lookup has a structural fallback.
+  // The region's aria-label is localized; outside English UIs it's found from its items.
+  const MEET_AVATAR = 'img[data-iml], img[src*="googleusercontent.com"]';
+  function meetPairs() {
+    let region = document.querySelector('[role="region"][aria-label="Captions"]');
+    if (!region) { const it = document.querySelector('.nMcdL'); region = it && it.closest('[role="region"]'); }
+    if (!region) return null;
+    let items = [...region.querySelectorAll('.nMcdL')];
+    if (!items.length) items = [...region.children].filter(el => el.querySelector(MEET_AVATAR));
+    let sp = '';
+    return items.map(it => {
+      const s = it.querySelector('.NWpY1d') || it.querySelector('span');
+      const tx = it.querySelector('.ygicle') || [...it.children].reverse().find(el => el.tagName === 'DIV' && !el.querySelector(MEET_AVATAR));
+      sp = norm(s && s.innerText) || sp;
+      return { el: tx || it, sp, t: norm(tx && tx.innerText) };
+    });
   }
 
   // Move settled lines (or all lines, when forced) from the current mode into the outbox.
@@ -121,7 +157,7 @@
         const e = R.panel.get(k); if (now - e.upd < settle) break;
         R.q.push(`${e.ts} | ${e.sp}: ${e.t}`); R.psent.add(k); R.lastOut = e.t;
       }
-    } else if (R.mode === 'overlay' || R.mode === 'teams') {
+    } else if (R.mode === 'overlay' || R.mode === 'teams' || R.mode === 'meet') {
       while (R.sent < R.list.length) {
         const e = R.list[R.sent]; if (now - e.upd < settle) break;
         const piece = R.mode === 'overlay' ? trim(e.t) : e.t; R.lastOut = e.t; R.sent++;
@@ -146,9 +182,10 @@
 
   R.timer = setInterval(() => {
     try {
-      if (TEAMS) {
-        if (scanTeams()) { R.mode = 'teams'; collect(false); }
-        else { if (R.mode === 'teams') collect(true); R.mode = 'no-captions'; }
+      if (PLATFORM !== 'zoom') {
+        const pairs = PLATFORM === 'teams' ? teamsPairs() : meetPairs();
+        if (pairs) { track(pairs); R.mode = PLATFORM; collect(false); }
+        else { if (R.mode === PLATFORM) collect(true); R.mode = 'no-captions'; }
         R.err = '';
         send(); return;
       }

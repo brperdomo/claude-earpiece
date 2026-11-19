@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local-only transcript sink for earpiece.
 
-Accepts POSTs from the Zoom and Microsoft Teams web clients and appends each line to the
+Accepts POSTs from the Zoom, Microsoft Teams and Google Meet web clients and appends each line to the
 transcript file. Binds to 127.0.0.1 only. The body is either a JSON array of lines
 or {"lines": [...], "mode": "...", "err": "..."}. Every accepted POST also rewrites
 <transcript_path>.hb as "<epoch seconds> <mode> <err>" so watch.sh can tell whether the
@@ -22,6 +22,7 @@ ALLOWED = {
     "https://teams.microsoft.com",
     "https://teams.cloud.microsoft",
     "https://teams.live.com",
+    "https://meet.google.com",
 }
 if os.environ.get("EARPIECE_EXTRA_ORIGIN"):
     ALLOWED.add(os.environ["EARPIECE_EXTRA_ORIGIN"])
